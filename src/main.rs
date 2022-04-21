@@ -7,7 +7,26 @@
 // [	If the byte at the data pointer is zero, then instead of moving the instruction pointer forward to the next command, jump it forward to the command after the matching ] command.
 // ]	If the byte at the data pointer is nonzero, then instead of moving the instruction pointer forward to the next command, jump it back to the command after the matching [ command.
 
-use crate::scanner::scan;
+mod io {
+
+    pub trait StdOut {
+        fn print(&mut self, c: char);
+    }
+
+    pub struct OutputBuffer {}
+
+    impl OutputBuffer {
+        pub fn new() -> Self {
+            Self {}
+        }
+    }
+
+    impl StdOut for OutputBuffer {
+        fn print(&mut self, c: char) {
+            println!("{}", c);
+        }
+    }
+}
 
 mod token {
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,65 +59,52 @@ mod bytecode {
 
 mod scanner {
     use crate::token::Token;
-    use nom::character::complete::one_of;
-    use nom::multi::many0;
-    use nom::IResult;
 
     // source code -> token
-    pub fn scan(input: &str) -> IResult<&str, Vec<Token>> {
-        let is_code = one_of("<>+-.,[] ");
-
-        let res = many0(is_code)(input)?;
-
-        Ok((
-            res.0,
-            res.1
-                .into_iter()
-                .map(|c| match c {
-                    '>' => Token::GreaterThan,
-                    '<' => Token::LessThan,
-                    '+' => Token::Plus,
-                    '-' => Token::Minus,
-                    '.' => Token::Dot,
-                    ',' => Token::Comma,
-                    '[' => Token::LeftSquareBracket,
-                    ']' => Token::RightSquareBracket,
-                    ' ' => Token::Space,
-                    _ => panic!("unexpected character: {}", c),
-                })
-                .collect(),
-        ))
+    pub fn scan(input: &str) -> Vec<Token> {
+        input
+            .chars()
+            .into_iter()
+            .filter(|c| match c {
+                '>' | '<' | '+' | '-' | '.' | ',' | '[' | ']' => true,
+                _ => false,
+            })
+            .map(|c| match c {
+                '>' => Token::GreaterThan,
+                '<' => Token::LessThan,
+                '+' => Token::Plus,
+                '-' => Token::Minus,
+                '.' => Token::Dot,
+                ',' => Token::Comma,
+                '[' => Token::LeftSquareBracket,
+                ']' => Token::RightSquareBracket,
+                _ => panic!("unexpected character: {}", c),
+            })
+            .collect()
     }
 
     #[test]
     fn scan_codes() {
         assert_eq!(
-            scan("<>+-"),
-            Ok((
-                "",
-                vec![
-                    Token::LessThan,
-                    Token::GreaterThan,
-                    Token::Plus,
-                    Token::Minus
-                ]
-            ))
+            scan("<>+-<>+-"),
+            vec![
+                Token::LessThan,
+                Token::GreaterThan,
+                Token::Plus,
+                Token::Minus,
+                Token::LessThan,
+                Token::GreaterThan,
+                Token::Plus,
+                Token::Minus
+            ]
         );
     }
 }
 
 mod compiler {
-    use crate::token::Token;
 
-    // TOKEN -> BYTECODE
     use super::bytecode::Bytecode;
-    use nom::{
-        bytes::complete::{tag, take_while_m_n},
-        combinator::map_res,
-        multi::many_m_n,
-        sequence::tuple,
-        IResult,
-    };
+    use crate::token::Token;
 
     pub struct Compiler {
         loop_stack: Vec<usize>,
@@ -112,7 +118,6 @@ mod compiler {
         }
 
         pub fn compile_bytecode(&mut self, input: Vec<Token>) -> Vec<Bytecode> {
-            let mut loop_jump_to = 0;
             let mut output = Vec::new();
 
             input
@@ -148,45 +153,79 @@ mod compiler {
             output
         }
     }
+
+    #[test]
+    fn token_to_bytescodes() {
+        let mut compiler = Compiler::new();
+
+        let input = vec![Token::GreaterThan, Token::LessThan, Token::Plus];
+        let output = compiler.compile_bytecode(input);
+        assert_eq!(
+            output,
+            vec![
+                Bytecode::IncrementPointer,
+                Bytecode::DecrementPointer,
+                Bytecode::IncrementValue
+            ]
+        )
+    }
 }
 
 mod vm {
-    use crate::bytecode::Bytecode;
+    use crate::{bytecode::Bytecode, io::StdOut};
 
-    pub struct VirtualMachine {
+    pub struct VirtualMachine<'a> {
         memory: Vec<u8>,
         mem_pointer: usize,
         code_pointer: usize,
+        pub stdout: &'a mut dyn StdOut,
     }
 
-    impl VirtualMachine {
-        pub fn new() -> Self {
+    impl<'a> VirtualMachine<'a> {
+        pub fn new(stdout: &'a mut dyn StdOut) -> Self {
             Self {
                 memory: vec![0; 30],
                 mem_pointer: 0,
                 code_pointer: 0,
+                stdout,
             }
         }
+
         pub fn run(&mut self, bytecodes: Vec<Bytecode>) {
             loop {
                 if let Some(bytecode) = bytecodes.get(self.code_pointer) {
+                    // println!(
+                    //     "{:?}, mem_pointer: {}, value: {}",
+                    //     bytecode, self.mem_pointer, self.memory[self.mem_pointer]
+                    // );
                     match bytecode {
                         Bytecode::IncrementPointer => {
-                            self.mem_pointer += 1;
+                            if self.mem_pointer == self.memory.len() - 1 {
+                                self.mem_pointer = 0;
+                            } else {
+                                self.mem_pointer += 1;
+                            }
                         }
                         Bytecode::DecrementPointer => {
-                            self.mem_pointer -= 1;
+                            if self.mem_pointer == 0 {
+                                self.mem_pointer = self.memory.len() - 1;
+                            } else {
+                                self.mem_pointer -= 1;
+                            }
                         }
                         Bytecode::IncrementValue => {
-                            self.memory[self.mem_pointer] += 1;
+                            self.memory[self.mem_pointer] =
+                                self.memory[self.mem_pointer].overflowing_add(1).0;
                         }
                         Bytecode::DecrementValue => {
-                            self.memory[self.mem_pointer] -= 1;
+                            self.memory[self.mem_pointer] =
+                                self.memory[self.mem_pointer].overflowing_sub(1).0;
                         }
                         Bytecode::OutputValue => {
-                            print!("{}", self.memory[self.mem_pointer] as char);
+                            self.stdout.print(self.memory[self.mem_pointer] as char)
                         }
                         Bytecode::InputValue => {
+                            // TODO:
                             // self.memory[self.pointer] = std::io::stdin().bytes().next().unwrap().unwrap()
                             //     as u8;
                             println!("input value");
@@ -199,7 +238,6 @@ mod vm {
                         Bytecode::LoopEnd { jump_to } => {
                             if self.memory[self.mem_pointer] != 0 {
                                 self.code_pointer = *jump_to;
-                                println!("jump to: {}", jump_to);
                             }
                         }
                     }
@@ -220,15 +258,84 @@ mod vm {
 
 fn main() {}
 
-#[test]
-fn test() {
-    let input = "++++++++ [>++++++++++++>+++++++++++++<<-] >++++. -. >+++++++. <+. +.";
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let res = scan(input);
-    let res = compiler::Compiler::new().compile_bytecode(res.unwrap().1);
-    println!("{:?}", res);
-    let mut vm = vm::VirtualMachine::new();
-    vm.run(res);
+    #[derive(PartialEq, Debug)]
+    pub struct TestStdOut {
+        pub buffer: Vec<char>,
+    }
 
-    vm.print_memory();
+    impl TestStdOut {
+        pub fn new() -> Self {
+            Self { buffer: Vec::new() }
+        }
+    }
+
+    impl io::StdOut for TestStdOut {
+        fn print(&mut self, c: char) {
+            self.buffer.push(c);
+        }
+    }
+
+    #[test]
+    fn basis_interpreter_test() {
+        let mut stdout = TestStdOut::new();
+        let input = "++++++++ [>++++++++++++>+++++++++++++<<-] >++++. -. >+++++++. <+. +.";
+
+        let tokens = scan(input);
+        let res = compiler::Compiler::new().compile_bytecode(tokens);
+        let mut vm = vm::VirtualMachine::new(&mut stdout);
+        vm.run(res);
+
+        assert_eq!(stdout.buffer, vec!['d', 'c', 'o', 'd', 'e']);
+    }
+
+    #[test]
+    fn hello_world() {
+        let mut stdout = TestStdOut::new();
+        let input = "
+>++++++++[-<+++++++++>]<.
+>>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.
+>->+++..
++++.
+>-.
+<<+[>[+>+]>>]<--------------.
+>>.
++++.
+------.
+--------.
+>+.
+>+.
+";
+
+        let tokens = scan(input);
+        // println!("{:?}", tokens);
+        let bytecodes = compiler::Compiler::new().compile_bytecode(tokens);
+        // println!("{:?}", bytecodes);
+        let mut vm = vm::VirtualMachine::new(&mut stdout);
+        vm.run(bytecodes);
+
+        assert_eq!(stdout.buffer, "Hello World!\n".chars().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn hello_world_2() {
+        let mut stdout = TestStdOut::new();
+        let input = "
++[>[<->+[>+++>[+++++++++++>][]-[<]>
+-]]++++++++++<]>>>>>>----.<<+++.<-.
+.+++.<-.>>>.<<.+++.------.>-.<<+.<.
+";
+
+        let tokens = scan(input);
+        println!("{:?}", tokens);
+        let bytecodes = compiler::Compiler::new().compile_bytecode(tokens);
+        println!("{:?}", bytecodes);
+        let mut vm = vm::VirtualMachine::new(&mut stdout);
+        vm.run(bytecodes);
+
+        assert_eq!(stdout.buffer, "Hello World!\n".chars().collect::<Vec<_>>());
+    }
 }
