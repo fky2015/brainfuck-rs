@@ -8,22 +8,41 @@
 // ]	If the byte at the data pointer is nonzero, then instead of moving the instruction pointer forward to the next command, jump it back to the command after the matching [ command.
 
 mod io {
+    use std::io::Read;
 
     pub trait StdOut {
         fn print(&mut self, c: char);
     }
 
-    pub struct OutputBuffer {}
+    pub trait StdIn {
+        fn read(&mut self) -> Result<char, std::io::Error>;
+    }
 
-    impl OutputBuffer {
+    pub trait StdInOut: StdIn + StdOut {}
+
+    impl<T: StdIn + StdOut> StdInOut for T {}
+
+    pub struct RawIO {}
+
+    impl RawIO {
         pub fn new() -> Self {
             Self {}
         }
     }
 
-    impl StdOut for OutputBuffer {
+    impl StdOut for RawIO {
         fn print(&mut self, c: char) {
             println!("{}", c);
+        }
+    }
+
+    impl StdIn for RawIO {
+        fn read(&mut self) -> Result<char, std::io::Error> {
+            std::io::stdin()
+                .bytes()
+                .next()
+                .unwrap()
+                .map(|byte| byte as char)
         }
     }
 }
@@ -100,7 +119,6 @@ mod scanner {
         );
     }
 }
-
 mod compiler {
 
     use super::bytecode::Bytecode;
@@ -172,22 +190,25 @@ mod compiler {
 }
 
 mod vm {
-    use crate::{bytecode::Bytecode, io::StdOut};
+    use crate::{
+        bytecode::Bytecode,
+        io::{StdIn, StdInOut, StdOut},
+    };
 
     pub struct VirtualMachine<'a> {
         memory: Vec<u8>,
         mem_pointer: usize,
         code_pointer: usize,
-        pub stdout: &'a mut dyn StdOut,
+        pub io: &'a mut dyn StdInOut,
     }
 
     impl<'a> VirtualMachine<'a> {
-        pub fn new(stdout: &'a mut dyn StdOut) -> Self {
+        pub fn new(io: &'a mut dyn StdInOut) -> Self {
             Self {
                 memory: vec![0; 30],
                 mem_pointer: 0,
                 code_pointer: 0,
-                stdout,
+                io,
             }
         }
 
@@ -222,13 +243,10 @@ mod vm {
                                 self.memory[self.mem_pointer].overflowing_sub(1).0;
                         }
                         Bytecode::OutputValue => {
-                            self.stdout.print(self.memory[self.mem_pointer] as char)
+                            self.io.print(self.memory[self.mem_pointer] as char)
                         }
                         Bytecode::InputValue => {
-                            // TODO:
-                            // self.memory[self.pointer] = std::io::stdin().bytes().next().unwrap().unwrap()
-                            //     as u8;
-                            println!("input value");
+                            self.memory[self.mem_pointer] = self.io.read().unwrap() as u8;
                         }
                         Bytecode::LoopStart { jump_to } => {
                             if self.memory[self.mem_pointer] == 0 {
@@ -258,44 +276,125 @@ mod vm {
 
 fn main() {}
 
+mod tester {}
+
 #[cfg(test)]
 mod tests {
+    use std::{collections::VecDeque, fs::File, io::Read};
+
     use super::*;
+    use scanner::scan;
+
+    use paste::paste;
+
+    macro_rules! gen_tests {
+        ($( $x: expr), *) => {
+            $(
+                paste!{
+                    #[test]
+                    fn [<gen_test_ $x:snake>]() {
+                        let (source, input, output) = load_test_from_file(&stringify!($x));
+                        test_helper(&source, input.as_deref(), output.as_deref());
+                    }
+                }
+            )*
+        };
+    }
+
+    fn test_helper(source_code: &str, input: Option<&str>, output: Option<&str>) {
+        let mut io_buffer = TestStdOut::new();
+
+        if let Some(input) = input {
+            io_buffer.push_input(input);
+        }
+
+        let tokens = scan(source_code);
+        let res = compiler::Compiler::new().compile_bytecode(tokens);
+        let mut vm = vm::VirtualMachine::new(&mut io_buffer);
+        vm.run(res);
+
+        if let Some(output) = output {
+            assert_eq!(io_buffer.output, output.chars().collect::<Vec<_>>());
+        }
+    }
+
+    fn load_test_from_file(file_name: &str) -> (String, Option<String>, Option<String>) {
+        let mut file = File::open(format!("testing/{}.b", file_name)).unwrap();
+        let mut contents = String::new();
+        file.read_to_string(&mut contents).unwrap();
+
+        let source_code = contents.lines().collect::<String>();
+
+        let stdout = File::open(format!("testing/{}.out", file_name))
+            .map(|mut file| {
+                let mut contents = String::new();
+                file.read_to_string(&mut contents).unwrap();
+                contents.lines().collect::<String>()
+            })
+            .ok();
+
+        let stdin = File::open(format!("testing/{}.in", file_name))
+            .map(|mut file| {
+                let mut contents = String::new();
+                file.read_to_string(&mut contents).unwrap();
+                contents.lines().collect::<String>()
+            })
+            .ok();
+
+        (source_code, stdout, stdin)
+    }
 
     #[derive(PartialEq, Debug)]
     pub struct TestStdOut {
-        pub buffer: Vec<char>,
+        pub input: VecDeque<char>,
+        pub output: Vec<char>,
     }
 
     impl TestStdOut {
         pub fn new() -> Self {
-            Self { buffer: Vec::new() }
+            Self {
+                input: VecDeque::new(),
+                output: Vec::new(),
+            }
+        }
+
+        pub fn push_input(&mut self, input: &str) {
+            self.input.extend(input.chars());
         }
     }
 
     impl io::StdOut for TestStdOut {
         fn print(&mut self, c: char) {
-            self.buffer.push(c);
+            self.output.push(c);
+        }
+    }
+
+    impl io::StdIn for TestStdOut {
+        fn read(&mut self) -> Result<char, std::io::Error> {
+            self.input
+                .pop_front()
+                .ok_or(std::io::Error::new(std::io::ErrorKind::Other, "No input"))
         }
     }
 
     #[test]
+    fn test_io() {
+        let source = ",.";
+        let input = Some("H");
+        let output = Some("H");
+        test_helper(source, input, output);
+    }
+
+    #[test]
     fn basis_interpreter_test() {
-        let mut stdout = TestStdOut::new();
-        let input = "++++++++ [>++++++++++++>+++++++++++++<<-] >++++. -. >+++++++. <+. +.";
-
-        let tokens = scan(input);
-        let res = compiler::Compiler::new().compile_bytecode(tokens);
-        let mut vm = vm::VirtualMachine::new(&mut stdout);
-        vm.run(res);
-
-        assert_eq!(stdout.buffer, vec!['d', 'c', 'o', 'd', 'e']);
+        let source = "++++++++ [>++++++++++++>+++++++++++++<<-] >++++. -. >+++++++. <+. +.";
+        let output = "dcode";
+        test_helper(source, None, Some(output));
     }
 
     #[test]
     fn hello_world() {
-        let mut stdout = TestStdOut::new();
-        let input = "
+        let source = "
 >++++++++[-<+++++++++>]<.
 >>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.
 >->+++..
@@ -309,33 +408,37 @@ mod tests {
 >+.
 >+.
 ";
-
-        let tokens = scan(input);
-        // println!("{:?}", tokens);
-        let bytecodes = compiler::Compiler::new().compile_bytecode(tokens);
-        // println!("{:?}", bytecodes);
-        let mut vm = vm::VirtualMachine::new(&mut stdout);
-        vm.run(bytecodes);
-
-        assert_eq!(stdout.buffer, "Hello World!\n".chars().collect::<Vec<_>>());
+        let output = "Hello World!\n";
+        test_helper(source, None, Some(output));
     }
 
     #[test]
     fn hello_world_2() {
-        let mut stdout = TestStdOut::new();
-        let input = "
+        let source = "
 +[>[<->+[>+++>[+++++++++++>][]-[<]>
 -]]++++++++++<]>>>>>>----.<<+++.<-.
 .+++.<-.>>>.<<.+++.------.>-.<<+.<.
 ";
+        let output = "Hello World!\n";
+        test_helper(source, None, Some(output));
+    }
 
-        let tokens = scan(input);
-        println!("{:?}", tokens);
-        let bytecodes = compiler::Compiler::new().compile_bytecode(tokens);
-        println!("{:?}", bytecodes);
-        let mut vm = vm::VirtualMachine::new(&mut stdout);
-        vm.run(bytecodes);
+    gen_tests![
+        hello_world,
+        Beer,
+        al_count_0,
+        al_count_1,
+        al_count_2,
+        al_count_3
+    ];
 
-        assert_eq!(stdout.buffer, "Hello World!\n".chars().collect::<Vec<_>>());
+    #[test]
+    fn test_examples() {
+        let files = vec!["Beer"];
+
+        for file in files {
+            let (source, input, output) = load_test_from_file(&file);
+            test_helper(&source, input.as_deref(), output.as_deref());
+        }
     }
 }
