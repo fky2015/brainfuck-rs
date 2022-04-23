@@ -404,8 +404,8 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
 
-    use pretty_assertions::{assert_eq, assert_ne};
     use crate::testing::{load_test_from_file, test_helper};
+    use pretty_assertions::{assert_eq, assert_ne};
 
     use super::*;
 
@@ -457,13 +457,7 @@ mod tests {
         test_helper(source, None, Some(output));
     }
 
-    gen_tests![
-        hello_world,
-        Beer,
-        al_count_0,
-        al_count_1,
-        Collatz
-    ];
+    gen_tests![hello_world, Beer, al_count_0, al_count_1, Collatz];
 
     #[test]
     fn test_examples() {
