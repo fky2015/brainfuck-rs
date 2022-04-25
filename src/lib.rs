@@ -32,7 +32,7 @@ pub mod io {
 
     impl StdOut for RawIO {
         fn print(&mut self, c: char) {
-            println!("{}", c);
+            print!("{}", c);
         }
     }
 
@@ -45,7 +45,6 @@ pub mod io {
                 .map(|byte| byte as char)
         }
     }
-
 }
 
 mod token {
