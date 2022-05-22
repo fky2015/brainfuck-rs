@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::io::{Read, Write};
 
 use clap::{Arg, Command};
 
@@ -25,6 +25,8 @@ fn main() {
     } else {
         // REPL mode.
         loop {
+            print!(">>>");
+            std::io::stdout().flush().unwrap();
             let mut input = String::new();
             std::io::stdin().read_line(&mut input).unwrap();
             interpreter.interpret(&input);
